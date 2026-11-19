@@ -22,6 +22,19 @@ def build_warehouse(config: PipelineConfig) -> None:
         bronze_glob = str(config.bronze_dir / "**" / "*.parquet").replace("\\", "/")
         con.execute("create schema if not exists silver")
         con.execute("create schema if not exists gold")
+        con.execute("create schema if not exists ops")
+        con.execute(
+            """
+            create table if not exists ops.dq_results (
+                run_id varchar,
+                check_name varchar,
+                passed boolean,
+                observed_value double,
+                expectation varchar,
+                checked_at_utc timestamp
+            )
+            """
+        )
         con.execute(
             f"""
             create or replace view silver.bronze_hourly_weather as

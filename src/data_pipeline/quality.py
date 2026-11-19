@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import duckdb
 
@@ -84,3 +85,20 @@ def run_quality_checks(config: PipelineConfig) -> list[QualityResult]:
     finally:
         con.close()
 
+
+
+def record_results(config: PipelineConfig, results: list[QualityResult]) -> str:
+    """Append results to ops.dq_results so quality can be monitored across runs."""
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    con = duckdb.connect(str(config.warehouse_path))
+    try:
+        con.executemany(
+            "insert into ops.dq_results values (?, ?, ?, ?, ?, now())",
+            [
+                (run_id, r.check_name, r.passed, float(r.observed_value), r.expectation)
+                for r in results
+            ],
+        )
+    finally:
+        con.close()
+    return run_id

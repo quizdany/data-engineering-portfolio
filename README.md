@@ -1,91 +1,90 @@
-# Data Pipeline: Real-Time Weather Lakehouse
+# Weather Lakehouse: a governed ETL pipeline
 
-An end-to-end data engineering project that ingests real public weather data from
-[Open-Meteo](https://open-meteo.com/), lands immutable raw data as Parquet,
-models analytics tables in DuckDB, and enforces data quality checks.
+[![ci](https://github.com/quizdany/data-engineering-portfolio/actions/workflows/ci.yml/badge.svg)](https://github.com/quizdany/data-engineering-portfolio/actions/workflows/ci.yml)
 
-The pipeline demonstrates:
+An end-to-end data pipeline that ingests public weather data for five African cities, models it in a layered warehouse, enforces data quality rules, documents every table and column in a data catalog with lineage, and publishes analytics-ready tables to PostgreSQL.
 
-- Public API ingestion with retries, typed configuration, and idempotent outputs.
-- Data lake zones: `raw`, `bronze`, `silver`, and `gold`.
-- Columnar storage with Parquet and an analytical warehouse with DuckDB.
-- Dimensional modeling: locations, hourly facts, daily marts, and anomaly metrics.
-- Data quality gates for uniqueness, ranges, nulls, and row-count contracts.
-- Reproducible orchestration through a Python CLI, Makefile, Docker, and CI.
+It is built to show the parts of data engineering that make data trustworthy, not just available:
+
+| Need | How this project handles it |
+| --- | --- |
+| Reliable ingestion | Open-Meteo API client with retries; raw responses kept for audit and replay; idempotent runs |
+| Layered modeling | `raw` → `bronze` (Parquet) → `silver` (typed, deduplicated) → `gold` (marts) in DuckDB |
+| Data quality | Contract and quality gates (row counts, uniqueness, valid ranges); results stored in `ops.dq_results` for monitoring |
+| Data governance | Data catalog and business glossary in `catalog/catalog.yml`; a check that fails if any column is undocumented |
+| Lineage | Derived automatically from the SQL and rendered as a diagram in [docs/data_catalog.md](docs/data_catalog.md) |
+| Serving | `publish` loads gold marts into PostgreSQL in one transaction, with primary keys on each table's grain, catalog descriptions as column comments, and row-count reconciliation |
+| Engineering practice | Typed config, tests on synthetic data (no network needed), PostgreSQL in CI, linting, Docker |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A["Open-Meteo Historical API"] --> B["Extract: HTTP client"]
-    B --> C["Raw JSON audit files"]
-    B --> D["Bronze Parquet"]
-    D --> E["Silver DuckDB tables"]
-    E --> F["Gold daily weather marts"]
-    F --> G["Quality checks and analytics exports"]
+    A["Open-Meteo API"] --> B["Raw JSON<br/>(audit, replay)"]
+    A --> C["Bronze Parquet"]
+    C --> D["Silver tables<br/>typed, deduplicated"]
+    D --> E["Gold marts"]
+    E --> F{"Quality gate"}
+    F --> G[("PostgreSQL<br/>analytics schema")]
+    H["catalog.yml<br/>+ SQL lineage"] -.-> I["Data catalog docs<br/>+ governance check"]
+    D -.-> I
+    E -.-> I
 ```
 
-## Quick Start
+## Quick start
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-python -m data_pipeline run --days 14
-python -m data_pipeline quality
+
+weather-pipeline run --days 14        # ingest and build the warehouse
+weather-pipeline quality              # run quality gates; results saved to ops.dq_results
+weather-pipeline catalog              # regenerate docs/data_catalog.md (lineage + glossary)
+weather-pipeline catalog --check      # fail if catalog and warehouse disagree
+
+docker compose up -d postgres         # local PostgreSQL
+weather-pipeline publish              # load gold marts into PostgreSQL (schema: analytics)
 ```
 
-The default run fetches hourly weather observations for Kigali, Nairobi, Lagos,
-Cape Town, and Accra.
+`publish` reads `PIPELINE_PG_DSN` (default: the docker-compose database).
 
-## Useful Commands
+## Data quality and governance
+
+**Quality gates** (`src/data_pipeline/quality.py`) check that hourly facts exist, that each city and hour appears once, and that temperature, humidity and precipitation are physically possible. A failed check exits non-zero, so a scheduler stops before bad data reaches users. Every run is appended to `ops.dq_results`.
+
+**The data catalog** (`catalog/catalog.yml`) records the owner, source, refresh pattern, each table's grain and description, every column's meaning, and a business glossary (baseline, anomaly, grain and so on). `catalog --check` compares it with the live warehouse schema. When I added the check, it immediately caught two partition columns (`start_date`, `end_date`) that were in the warehouse but undocumented.
+
+**Lineage** is parsed from the transformation SQL, so it can't drift from the code:
+
+```mermaid
+flowchart LR
+    A["bronze Parquet"] --> B["silver.bronze_hourly_weather"]
+    B --> C["silver.dim_location"]
+    B --> D["silver.fact_hourly_weather"]
+    C --> D
+    D --> E["gold.mart_daily_weather"]
+    E --> F["gold.mart_city_anomalies"]
+```
+
+## Tests
 
 ```bash
-make install
-make run
-make quality
-make test
-make clean
+pytest                                                   # offline, on synthetic data
+TEST_PG_DSN=postgresql://pipeline:pipeline@localhost:5432/metadata pytest   # + PostgreSQL publish
 ```
 
-## Outputs
+The suite builds the warehouse from synthetic API payloads, so it needs no network. It checks the marts, confirms that quality checks pass on good data and catch impossible values, verifies that the catalog documents every column, validates the derived lineage, and tests that publishing to PostgreSQL is idempotent, enforces primary keys and carries catalog comments. CI runs everything against a PostgreSQL service container.
 
-Generated data is intentionally ignored by Git:
-
-- `data/raw`: JSON API responses for auditability.
-- `data/bronze`: source-shaped Parquet.
-- `data/warehouse/weather.duckdb`: analytical warehouse.
-- `data/exports`: CSV extracts for dashboards and review.
-
-## Optional Services
-
-The included `docker-compose.yml` starts common data-system building blocks:
-
-- MinIO for S3-compatible object storage.
-- PostgreSQL for metadata or serving use cases.
-- Adminer for database inspection.
-
-```bash
-docker compose up -d
-```
-
-The Python pipeline runs locally without these services so reviewers can test it
-quickly, while the compose file demonstrates how the same project can be lifted
-into a fuller data platform.
-
-## Data Source
-
-Open-Meteo provides free weather APIs with no API key required and historical
-weather data from 1940 onward. This project uses the historical archive endpoint
-for hourly temperature, precipitation, wind speed, and humidity.
-
-## Repository Layout
+## Repository layout
 
 ```text
-src/data_pipeline/       Pipeline package
-sql/                     Warehouse transformation SQL
-tests/                   Unit tests
-docs/architecture.md     Data-system design notes
-.github/workflows/ci.yml CI checks
+src/data_pipeline/   extract, warehouse, quality, catalog, publish, CLI
+sql/                 transformation SQL (silver and gold)
+catalog/catalog.yml  data catalog and business glossary
+docs/                architecture notes, data contract, generated data catalog
+tests/               unit and end-to-end tests
 ```
 
+## Data source
+
+[Open-Meteo](https://open-meteo.com/) historical weather API: free, no API key, hourly data from 1940 onward. The pipeline loads hourly temperature, humidity, precipitation and wind speed for Kigali, Nairobi, Lagos, Cape Town and Accra.

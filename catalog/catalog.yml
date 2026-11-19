@@ -1,0 +1,114 @@
+# Data catalog for the weather warehouse.
+# Every table and column in the silver and gold layers must be described here:
+# `weather-pipeline catalog --check` fails the build if anything is missing,
+# and `weather-pipeline catalog` regenerates docs/data_catalog.md with lineage.
+
+owner: Daniel Kwizera (data engineering)
+source_system: Open-Meteo Historical Weather API (archive-api.open-meteo.com)
+refresh: On demand via `weather-pipeline run`; each run rebuilds silver and gold.
+
+glossary:
+  observation:
+    definition: One hourly weather reading for one city.
+  grain:
+    definition: What one row of a table represents. Two rows must never describe the same grain.
+  baseline:
+    definition: The average of a measure for a city over all days in the loaded window. Anomalies are measured against it.
+  anomaly:
+    definition: The difference between a day's value and the city baseline. Positive means above normal.
+  bronze layer:
+    definition: Source-shaped data stored as Parquet, plus ingestion metadata. Never edited.
+  silver layer:
+    definition: Typed, deduplicated tables with conformed dimensions.
+  gold layer:
+    definition: Business-ready aggregates (marts) that dashboards and APIs read.
+
+tables:
+  silver.bronze_hourly_weather:
+    layer: silver
+    description: View over all bronze Parquet files. Kept as a view so silver always reads the latest landed data.
+    grain: One row per city, observation hour and ingestion run (duplicates possible).
+    columns:
+      city: {description: City name as configured in the pipeline.}
+      country: {description: Country of the city.}
+      latitude: {description: Latitude in decimal degrees (WGS84).}
+      longitude: {description: Longitude in decimal degrees (WGS84).}
+      observed_at: {description: Local observation hour.}
+      temperature_c: {description: Air temperature at 2 m, degrees Celsius.}
+      relative_humidity_pct: {description: Relative humidity at 2 m, percent.}
+      precipitation_mm: {description: Total precipitation in the hour, millimetres.}
+      wind_speed_kmh: {description: Wind speed at 10 m, km/h.}
+      source: {description: Source system identifier. Always open_meteo.}
+      ingested_at_utc: {description: When the pipeline ingested the row (UTC).}
+      start_date: {description: First day of the ingestion window, from the Parquet partition path.}
+      end_date: {description: Last day of the ingestion window, from the Parquet partition path.}
+
+  silver.dim_location:
+    layer: silver
+    description: One row per city with a surrogate key, shared by facts and marts.
+    grain: One row per city and country.
+    columns:
+      location_id: {description: Surrogate key, stable within a build.}
+      city: {description: City name.}
+      country: {description: Country name.}
+      latitude: {description: Latitude in decimal degrees.}
+      longitude: {description: Longitude in decimal degrees.}
+
+  silver.fact_hourly_weather:
+    layer: silver
+    description: Typed, deduplicated hourly observations. When an hour was ingested twice, the latest ingestion wins.
+    grain: One row per city and observation hour.
+    quality_checks: [hourly_fact_has_rows, hourly_fact_unique_city_timestamp, temperature_reasonable_range, humidity_reasonable_range, precipitation_non_negative]
+    columns:
+      location_id: {description: Foreign key to silver.dim_location.}
+      city: {description: City name.}
+      country: {description: Country name.}
+      observed_at: {description: Local observation hour.}
+      temperature_c: {description: Air temperature at 2 m, degrees Celsius. Valid range -80 to 60.}
+      relative_humidity_pct: {description: Relative humidity, percent. Valid range 0 to 100.}
+      precipitation_mm: {description: Hourly precipitation, millimetres. Never negative.}
+      wind_speed_kmh: {description: Wind speed at 10 m, km/h.}
+      source: {description: Source system identifier.}
+      ingested_at_utc: {description: Ingestion time of the winning row (UTC).}
+
+  gold.mart_daily_weather:
+    layer: gold
+    description: Daily weather summary per city for dashboards and the PostgreSQL serving layer.
+    grain: One row per city and observation date.
+    columns:
+      location_id: {description: Foreign key to silver.dim_location.}
+      city: {description: City name.}
+      country: {description: Country name.}
+      observation_date: {description: Local calendar date.}
+      avg_temperature_c: {description: Mean of hourly temperatures, degrees Celsius.}
+      min_temperature_c: {description: Lowest hourly temperature, degrees Celsius.}
+      max_temperature_c: {description: Highest hourly temperature, degrees Celsius.}
+      avg_relative_humidity_pct: {description: Mean hourly relative humidity, percent.}
+      total_precipitation_mm: {description: Sum of hourly precipitation, millimetres.}
+      avg_wind_speed_kmh: {description: Mean hourly wind speed, km/h.}
+      hourly_observations: {description: Number of hourly rows behind the day. 24 means a complete day.}
+
+  gold.mart_city_anomalies:
+    layer: gold
+    description: Daily temperature and rainfall anomalies against each city's baseline for the loaded window.
+    grain: One row per city and observation date.
+    columns:
+      city: {description: City name.}
+      country: {description: Country name.}
+      observation_date: {description: Local calendar date.}
+      avg_temperature_c: {description: Daily mean temperature, degrees Celsius.}
+      temperature_anomaly_c: {description: Daily mean temperature minus the city baseline, degrees Celsius.}
+      total_precipitation_mm: {description: Daily precipitation, millimetres.}
+      precipitation_anomaly_mm: {description: Daily precipitation minus the city baseline, millimetres.}
+
+  ops.dq_results:
+    layer: ops
+    description: History of data quality check results, one row per check per run. Used to monitor quality over time.
+    grain: One row per run and check.
+    columns:
+      run_id: {description: Identifier of the quality run (UTC timestamp).}
+      check_name: {description: Name of the quality check.}
+      passed: {description: Whether the check met its expectation.}
+      observed_value: {description: Value the check measured.}
+      expectation: {description: Rule the value had to meet, e.g. "= 0".}
+      checked_at_utc: {description: When the check ran (UTC).}
