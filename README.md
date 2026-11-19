@@ -1,91 +1,68 @@
-# Data Pipeline: Real-Time Weather Lakehouse
+# Weather Lakehouse – ETL pipeline
 
-An end-to-end data engineering project that ingests real public weather data from
-[Open-Meteo](https://open-meteo.com/), lands immutable raw data as Parquet,
-models analytics tables in DuckDB, and enforces data quality checks.
+[![ci](https://github.com/quizdany/data-engineering-portfolio/actions/workflows/ci.yml/badge.svg)](https://github.com/quizdany/data-engineering-portfolio/actions/workflows/ci.yml)
 
-The pipeline demonstrates:
+Pulls hourly weather data for five African cities (Kigali, Nairobi, Lagos, Cape Town, Accra) from the Open-Meteo API, builds a layered warehouse in DuckDB, checks data quality, and publishes the final tables to PostgreSQL.
 
-- Public API ingestion with retries, typed configuration, and idempotent outputs.
-- Data lake zones: `raw`, `bronze`, `silver`, and `gold`.
-- Columnar storage with Parquet and an analytical warehouse with DuckDB.
-- Dimensional modeling: locations, hourly facts, daily marts, and anomaly metrics.
-- Data quality gates for uniqueness, ranges, nulls, and row-count contracts.
-- Reproducible orchestration through a Python CLI, Makefile, Docker, and CI.
+## What's in it
 
-## Architecture
+- **Ingestion** – API client with retries; raw JSON kept for replay; reruns are idempotent
+- **Layers** – raw → bronze (Parquet) → silver (typed, deduplicated) → gold (marts)
+- **Quality checks** – row counts, unique city/hour, valid ranges. A failure stops the run. Results are saved to `ops.dq_results`
+- **Data catalog** – `catalog/catalog.yml` has the owner, grain, column descriptions and a glossary. `catalog --check` fails if a column isn't documented
+- **Lineage** – parsed from the SQL, shown in [docs/data_catalog.md](docs/data_catalog.md)
+- **PostgreSQL** – `publish` loads the marts in one transaction, with primary keys, column comments from the catalog, and a row-count check
+- **Tests** – run on fake API data, no network needed; CI also tests the PostgreSQL step
 
 ```mermaid
 flowchart LR
-    A["Open-Meteo Historical API"] --> B["Extract: HTTP client"]
-    B --> C["Raw JSON audit files"]
-    B --> D["Bronze Parquet"]
-    D --> E["Silver DuckDB tables"]
-    E --> F["Gold daily weather marts"]
-    F --> G["Quality checks and analytics exports"]
+    A["Open-Meteo API"] --> B["raw JSON"]
+    A --> C["bronze"]
+    C --> D["silver"] --> E["gold"] --> F{"quality checks"} --> G[("PostgreSQL")]
 ```
 
-## Quick Start
+## Run
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python -m data_pipeline run --days 14
-python -m data_pipeline quality
+
+weather-pipeline run --days 14
+weather-pipeline quality
+weather-pipeline catalog            # regenerate docs/data_catalog.md
+weather-pipeline catalog --check
+
+docker compose up -d postgres
+weather-pipeline publish            # uses PIPELINE_PG_DSN
 ```
 
-The default run fetches hourly weather observations for Kigali, Nairobi, Lagos,
-Cape Town, and Accra.
+## Lineage
 
-## Useful Commands
+```mermaid
+flowchart LR
+    A["bronze Parquet"] --> B["silver.bronze_hourly_weather"]
+    B --> C["silver.dim_location"]
+    B --> D["silver.fact_hourly_weather"]
+    C --> D
+    D --> E["gold.mart_daily_weather"]
+    E --> F["gold.mart_city_anomalies"]
+```
+
+## Tests
 
 ```bash
-make install
-make run
-make quality
-make test
-make clean
+pytest
+TEST_PG_DSN=postgresql://pipeline:pipeline@localhost:5432/metadata pytest   # includes the Postgres test
 ```
 
-## Outputs
-
-Generated data is intentionally ignored by Git:
-
-- `data/raw`: JSON API responses for auditability.
-- `data/bronze`: source-shaped Parquet.
-- `data/warehouse/weather.duckdb`: analytical warehouse.
-- `data/exports`: CSV extracts for dashboards and review.
-
-## Optional Services
-
-The included `docker-compose.yml` starts common data-system building blocks:
-
-- MinIO for S3-compatible object storage.
-- PostgreSQL for metadata or serving use cases.
-- Adminer for database inspection.
-
-```bash
-docker compose up -d
-```
-
-The Python pipeline runs locally without these services so reviewers can test it
-quickly, while the compose file demonstrates how the same project can be lifted
-into a fuller data platform.
-
-## Data Source
-
-Open-Meteo provides free weather APIs with no API key required and historical
-weather data from 1940 onward. This project uses the historical archive endpoint
-for hourly temperature, precipitation, wind speed, and humidity.
-
-## Repository Layout
+## Layout
 
 ```text
-src/data_pipeline/       Pipeline package
-sql/                     Warehouse transformation SQL
-tests/                   Unit tests
-docs/architecture.md     Data-system design notes
-.github/workflows/ci.yml CI checks
+src/data_pipeline/   extract, warehouse, quality, catalog, publish, cli
+sql/                 silver and gold SQL
+catalog/             catalog.yml
+docs/                architecture, data contract, generated catalog
+tests/
 ```
 
+Data: [Open-Meteo](https://open-meteo.com/) historical weather API (free, no key).

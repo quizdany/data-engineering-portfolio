@@ -5,9 +5,11 @@ from pathlib import Path
 
 import typer
 
+from data_pipeline.catalog import build_catalog
 from data_pipeline.config import build_config, date_window
 from data_pipeline.extract import extract_to_bronze
-from data_pipeline.quality import run_quality_checks
+from data_pipeline.publish import publish as publish_to_postgres
+from data_pipeline.quality import record_results, run_quality_checks
 from data_pipeline.warehouse import build_warehouse
 
 app = typer.Typer(help="Open-Meteo weather lakehouse pipeline.")
@@ -35,8 +37,34 @@ def quality() -> None:
             f"expected {result.expectation}"
         )
         typer.echo(message)
+    run_id = record_results(config, results)
+    typer.echo(f"Recorded run {run_id} in ops.dq_results")
     if not all(result.passed for result in results):
         raise typer.Exit(code=1)
+
+
+@app.command()
+def catalog(
+    check: bool = typer.Option(False, "--check", help="Only verify the catalog; write nothing."),
+) -> None:
+    """Regenerate docs/data_catalog.md, or fail if the catalog and warehouse disagree."""
+    config = build_config(Path.cwd())
+    gaps = build_catalog(config, check_only=check)
+    for line in gaps.lines():
+        typer.echo(f"GAP {line}")
+    if not gaps.ok:
+        raise typer.Exit(code=1)
+    typer.echo("Catalog matches the warehouse." + ("" if check else " Wrote docs/data_catalog.md"))
+
+
+@app.command()
+def publish(
+    dsn: str = typer.Option(None, envvar="PIPELINE_PG_DSN", help="PostgreSQL connection string."),
+) -> None:
+    """Publish gold marts and the location dimension to PostgreSQL (schema: analytics)."""
+    config = build_config(Path.cwd())
+    for result in publish_to_postgres(config, dsn):
+        typer.echo(f"Published {result.table}: {result.rows} rows")
 
 
 @app.command()

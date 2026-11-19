@@ -26,11 +26,18 @@ but remain easy for reviewers to run on a laptop.
 - **Separation of concerns**: Extraction, modeling, and validation are isolated modules.
 - **Portability**: Docker services show how object storage and metadata stores fit in.
 
+## Governance and Serving
+
+- `catalog/catalog.yml` – table/column descriptions, owner, grain, glossary
+- lineage is parsed from `sql/` and written to `docs/data_catalog.md`
+- `catalog --check` fails on undocumented or stale columns
+- quality results are appended to `ops.dq_results`
+- `publish` loads gold marts into PostgreSQL (one transaction, primary keys, row-count check)
+
 ## Future Production Extensions
 
 - Add Airflow, Dagster, or Prefect scheduling.
 - Store Parquet in S3 or MinIO using partitioned paths.
 - Add Great Expectations or Soda for richer data contracts.
-- Publish marts to Postgres for BI tools.
 - Add OpenTelemetry metrics and structured logs.
 
